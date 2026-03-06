@@ -1,1 +1,0 @@
-"""Manga translation MVP package."""
