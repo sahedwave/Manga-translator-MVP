@@ -1,9 +1,14 @@
 from abc import ABC, abstractmethod
 import os
 
+from flask import Flask, request, jsonify
 from deep_translator import GoogleTranslator
-from google import genai
+import google.generativeai as genai
 
+
+# ===============================
+# Utility functions
+# ===============================
 
 def _match_source_style(source_text: str, translated_text: str) -> str:
     if source_text.isupper():
@@ -21,6 +26,7 @@ def _polish_translation(source_text: str, translated_text: str) -> str:
         "OH CHANGSU": "Oh, Changsu.",
         "PARK JINYEONG-SSI": "Park Jinyeong-ssi.",
     }
+
     if source_upper in exact_source_overrides:
         return _match_source_style(source_text, exact_source_overrides[source_upper])
 
@@ -29,6 +35,7 @@ def _polish_translation(source_text: str, translated_text: str) -> str:
         "DON'T SAY SO DISAPPOINTING THINGS, DON'T.": "Don't say something so disappointing.",
         "YOUR CONDITION SHOULD STILL BE...": "Your condition should still be...",
     }
+
     for old, new in phrase_replacements.items():
         cleaned = cleaned.replace(old, new)
 
@@ -37,6 +44,10 @@ def _polish_translation(source_text: str, translated_text: str) -> str:
 
     return _match_source_style(source_text, cleaned)
 
+
+# ===============================
+# Translator Base
+# ===============================
 
 class BaseTranslator(ABC):
     @abstractmethod
@@ -50,7 +61,7 @@ class MockTranslator(BaseTranslator):
 
 
 class GoogleWebTranslator(BaseTranslator):
-    def __init__(self, source_lang: str = "auto", target_lang: str = "en") -> None:
+    def __init__(self, source_lang="auto", target_lang="en"):
         self._translator = GoogleTranslator(source=source_lang, target=target_lang)
 
     def translate(self, text: str) -> str:
@@ -59,35 +70,78 @@ class GoogleWebTranslator(BaseTranslator):
 
 
 class GeminiTranslator(BaseTranslator):
-    def __init__(self, source_lang: str = "auto", target_lang: str = "en", api_key: str | None = None, model: str = "gemini-3-flash-preview") -> None:
+    def __init__(self, source_lang="auto", target_lang="en", api_key=None, model="gemini-1.5-flash"):
         resolved_key = api_key or os.getenv("GEMINI_API_KEY")
         if not resolved_key:
-            raise ValueError("Gemini API key is required for Gemini translation.")
-        self._client = genai.Client(api_key=resolved_key)
+            raise ValueError("GEMINI_API_KEY not set")
+
+        genai.configure(api_key=resolved_key)
+        self._model = genai.GenerativeModel(model)
         self._source_lang = source_lang
         self._target_lang = target_lang
-        self._model = model
 
     def translate(self, text: str) -> str:
-        response = self._client.models.generate_content(
-            model=self._model,
-            contents=(
-                "Translate manga dialogue into natural English. "
-                "Preserve names and honorifics where appropriate. "
-                "Be concise and idiomatic. Return only the translated line.\n"
-                f"Source language: {self._source_lang}. Target language: {self._target_lang}. Text: {text}"
-            ),
+        prompt = (
+            f"Translate manga dialogue into natural English.\n"
+            f"Keep names and honorifics.\n"
+            f"Be concise.\n\n"
+            f"Text: {text}"
         )
+
+        response = self._model.generate_content(prompt)
         translated = (response.text or "").strip()
+
         return _polish_translation(text, translated)
 
 
-def build_translator(name: str, source_lang: str, target_lang: str, api_key: str | None = None, model: str = "gemini-3-flash-preview") -> BaseTranslator:
-    normalized = name.lower().strip()
-    if normalized == "mock":
+# ===============================
+# Factory
+# ===============================
+
+def build_translator(name, source_lang, target_lang):
+    name = name.lower().strip()
+
+    if name == "mock":
         return MockTranslator()
-    if normalized == "google":
-        return GoogleWebTranslator(source_lang=source_lang, target_lang=target_lang)
-    if normalized == "gemini":
-        return GeminiTranslator(source_lang=source_lang, target_lang=target_lang, api_key=api_key, model=model)
-    raise ValueError(f"Unsupported translator backend: {name}")
+
+    if name == "google":
+        return GoogleWebTranslator(source_lang, target_lang)
+
+    if name == "gemini":
+        return GeminiTranslator(source_lang, target_lang)
+
+    raise ValueError(f"Unsupported translator: {name}")
+
+
+# ===============================
+# Flask App
+# ===============================
+
+app = Flask(__name__)
+
+
+@app.route("/")
+def home():
+    return "Manga Translator API Running 🚀"
+
+
+@app.route("/translate")
+def translate_api():
+    text = request.args.get("text", "")
+    engine = request.args.get("engine", "google")
+
+    if not text:
+        return jsonify({"error": "No text provided"}), 400
+
+    try:
+        translator = build_translator(engine, "auto", "en")
+        result = translator.translate(text)
+
+        return jsonify({
+            "engine": engine,
+            "original": text,
+            "translated": result
+        })
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
