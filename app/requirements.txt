@@ -1,1 +1,4 @@
-hey
+flask
+gunicorn
+deep-translator
+google-generativeai
